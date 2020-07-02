@@ -3251,6 +3251,10 @@ JitsiConference.prototype.createVideoSIPGWSession
             .createVideoSIPGWSession(sipAddress, displayName);
     };
 
+JitsiConference.prototype.isE2EESupported = function() {
+    return false;
+};
+
 /**
  * Sends a conference.join analytics event.
  *
