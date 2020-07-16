@@ -488,6 +488,33 @@ TraceablePeerConnection.prototype._peerMutedChanged = function(
 };
 
 /**
+ * Obtains audio levels of the remote audio tracks by getting the source
+ * information on the RTCRtpReceivers. The information relevant to the ssrc
+ * is updated each time a RTP packet constaining the ssrc is received.
+ * @returns {Object} containing ssrc and audio level information as a
+ * key-value pair.
+ */
+TraceablePeerConnection.prototype.getAudioLevels = function() {
+    const audioLevels = {};
+    const audioReceivers = this.peerconnection.getReceivers()
+        .filter(receiver => receiver.track && receiver.track.kind === MediaType.AUDIO);
+
+    audioReceivers.forEach(remote => {
+        const ssrc = remote.getSynchronizationSources();
+
+        if (ssrc && ssrc.length) {
+            // As per spec, this audiolevel is a value between 0..1 (linear), where 1.0
+            // represents 0 dBov, 0 represents silence, and 0.5 represents approximately
+            // 6 dBSPL change in the sound pressure level from 0 dBov.
+            // https://www.w3.org/TR/webrtc/#dom-rtcrtpcontributingsource-audiolevel
+            audioLevels[ssrc[0].source] = ssrc[0].audioLevel;
+        }
+    });
+
+    return audioLevels;
+};
+
+/**
  * Obtains local tracks for given {@link MediaType}. If the <tt>mediaType</tt>
  * argument is omitted the list of all local tracks will be returned.
  * @param {MediaType} [mediaType]
@@ -831,7 +858,7 @@ TraceablePeerConnection.prototype._createRemoteTrack = function(
 
     remoteTracksMap.set(mediaType, remoteTrack);
 
-    this.eventEmitter.emit(RTCEvents.REMOTE_TRACK_ADDED, remoteTrack);
+    this.eventEmitter.emit(RTCEvents.REMOTE_TRACK_ADDED, remoteTrack, this);
 };
 
 /* eslint-enable max-params */
@@ -1412,6 +1439,23 @@ Object.keys(getters).forEach(prop => {
 
 TraceablePeerConnection.prototype._getSSRC = function(rtcId) {
     return this.localSSRCs.get(rtcId);
+};
+
+/**
+ * Checks if given track belongs to this peerconnection instance.
+ *
+ * @param {JitsiLocalTrack|JitsiRemoteTrack} track - The track to be checked.
+ * @returns {boolean}
+ */
+TraceablePeerConnection.prototype.containsTrack = function(track) {
+    if (track.isLocal()) {
+        return this.localTracks.has(track.rtcId);
+    }
+
+    const participantId = track.getParticipantId();
+    const remoteTracksMap = this.remoteTracks.get(participantId);
+
+    return Boolean(remoteTracksMap && remoteTracksMap.get(track.getType()) === track);
 };
 
 /**
@@ -2137,15 +2181,12 @@ TraceablePeerConnection.prototype.setSenderVideoConstraint = function(frameHeigh
                 });
             });
     }
-
-    // Apply the height constraint on the local camera track
-    const aspectRatio = (track.getSettings().width / track.getSettings().height).toPrecision(4);
-
     logger.debug(`Setting max height of ${newHeight} on local video`);
 
+    // Do not specify the aspect ratio, let camera pick
+    // the best aspect ratio for the given height.
     return track.applyConstraints(
         {
-            aspectRatio,
             height: {
                 ideal: newHeight
             }

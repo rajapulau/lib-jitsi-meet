@@ -47,6 +47,8 @@ const DEFAULT_MAX_STATS = 300;
  * @property {boolean} disableH264 - Described in the config.js[1].
  * @property {boolean} disableRtx - Described in the config.js[1].
  * @property {boolean} disableSimulcast - Described in the config.js[1].
+ * @property {boolean} enableInsertableStreams - Set to true when the insertable streams constraints is to be enabled
+ * on the PeerConnection.
  * @property {boolean} enableLayerSuspension - Described in the config.js[1].
  * @property {boolean} failICE - it's an option used in the tests. Set to
  * <tt>true</tt> to block any real candidates and make the ICE fail.
@@ -326,6 +328,8 @@ export default class JingleSessionPC extends JingleSession {
             pcOptions.maxstats = DEFAULT_MAX_STATS;
         }
         pcOptions.capScreenshareBitrate = false;
+        pcOptions.enableInsertableStreams = options.enableInsertableStreams;
+
         if (this.isP2P) {
             // simulcast needs to be disabled for P2P (121) calls
             pcOptions.disableSimulcast = true;
@@ -1438,13 +1442,26 @@ export default class JingleSessionPC extends JingleSession {
                         sid: this.sid
                     })
                     .c('reason')
-                    .c((options && options.reason) || 'success');
+                    .c((options && options.reason) || 'success')
+                    .up();
 
             if (options && options.reasonDescription) {
-                sessionTerminate.up()
+                sessionTerminate
                     .c('text')
-                    .t(options.reasonDescription);
+                    .t(options.reasonDescription)
+                    .up()
+                    .up();
+            } else {
+                sessionTerminate.up();
             }
+
+            this._bridgeSessionId
+                && sessionTerminate.c(
+                    'bridge-session', {
+                        xmlns: 'http://jitsi.org/protocol/focus',
+                        id: this._bridgeSessionId,
+                        restart: options && options.requestRestart === true
+                    }).up();
 
             // Calling tree() to print something useful
             sessionTerminate = sessionTerminate.tree();
