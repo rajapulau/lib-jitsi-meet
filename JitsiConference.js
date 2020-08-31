@@ -1,9 +1,9 @@
 /* global __filename, $, Promise */
-import { Strophe } from 'strophe.js';
 
 import EventEmitter from 'events';
 import { getLogger } from 'jitsi-meet-logger';
 import isEqual from 'lodash.isequal';
+import { Strophe } from 'strophe.js';
 
 import * as JitsiConferenceErrors from './JitsiConferenceErrors';
 import JitsiConferenceEventManager from './JitsiConferenceEventManager';
@@ -13,26 +13,27 @@ import JitsiTrackError from './JitsiTrackError';
 import * as JitsiTrackErrors from './JitsiTrackErrors';
 import * as JitsiTrackEvents from './JitsiTrackEvents';
 import authenticateAndUpgradeRole from './authenticateAndUpgradeRole';
-import P2PDominantSpeakerDetection from './modules/detection/P2PDominantSpeakerDetection';
 import RTC from './modules/RTC/RTC';
-import VADTalkMutedDetection from './modules/detection/VADTalkMutedDetection';
-import VADNoiseDetection from './modules/detection/VADNoiseDetection';
-import VADAudioAnalyser from './modules/detection/VADAudioAnalyser';
-import * as DetectionEvents from './modules/detection/DetectionEvents';
-import NoAudioSignalDetection from './modules/detection/NoAudioSignalDetection';
 import browser from './modules/browser';
 import ConnectionQuality from './modules/connectivity/ConnectionQuality';
 import IceFailedHandling
     from './modules/connectivity/IceFailedHandling';
 import ParticipantConnectionStatusHandler
     from './modules/connectivity/ParticipantConnectionStatus';
+import * as DetectionEvents from './modules/detection/DetectionEvents';
+import NoAudioSignalDetection from './modules/detection/NoAudioSignalDetection';
+import P2PDominantSpeakerDetection from './modules/detection/P2PDominantSpeakerDetection';
+import VADAudioAnalyser from './modules/detection/VADAudioAnalyser';
+import VADNoiseDetection from './modules/detection/VADNoiseDetection';
+import VADTalkMutedDetection from './modules/detection/VADTalkMutedDetection';
 import { E2EEncryption } from './modules/e2ee/E2EEncryption';
 import E2ePing from './modules/e2eping/e2eping';
 import Jvb121EventGenerator from './modules/event/Jvb121EventGenerator';
+import { QualityController } from './modules/qualitycontrol/QualityController';
 import RecordingManager from './modules/recording/RecordingManager';
 import Settings from './modules/settings/Settings';
-import AvgRTPStatsReporter from './modules/statistics/AvgRTPStatsReporter';
 import AudioOutputProblemDetector from './modules/statistics/AudioOutputProblemDetector';
+import AvgRTPStatsReporter from './modules/statistics/AvgRTPStatsReporter';
 import SpeakerStatsCollector from './modules/statistics/SpeakerStatsCollector';
 import Statistics from './modules/statistics/statistics';
 import Transcriber from './modules/transcription/transcriber';
@@ -58,7 +59,6 @@ import {
     createJingleEvent,
     createP2PEvent
 } from './service/statistics/AnalyticsEvents';
-import { QualityController } from './modules/qualitycontrol/QualityController';
 import * as XMPPEvents from './service/xmpp/XMPPEvents';
 
 const logger = getLogger(__filename);
@@ -233,7 +233,14 @@ export default function JitsiConference(options) {
 
     this.videoSIPGWHandler = new VideoSIPGW(this.room);
     this.recordingManager = new RecordingManager(this.room);
-    this._conferenceJoinAnalyticsEventSent = false;
+
+    /**
+     * If the conference.joined event has been sent this will store the timestamp when it happened.
+     *
+     * @type {undefined|number}
+     * @private
+     */
+    this._conferenceJoinAnalyticsEventSent = undefined;
 }
 
 // FIXME convert JitsiConference to ES6 - ASAP !
@@ -375,6 +382,11 @@ JitsiConference.prototype._init = function(options = {}) {
         Statistics.analytics.addPermanentProperties({
             'callstats_name': this._statsCurrentId
         });
+
+        // Start performance observer for monitoring long tasks
+        if (config.longTasksStatsInterval) {
+            this.statistics.attachLongTasksStats(this);
+        }
     }
 
     this.eventManager.setupChatRoomListeners();
@@ -537,6 +549,9 @@ JitsiConference.prototype.leave = function() {
     this.getLocalTracks().forEach(track => this.onLocalTrackRemoved(track));
 
     this.rtc.closeBridgeChannel();
+
+    this._sendConferenceLeftAnalyticsEvent();
+
     if (this.statistics) {
         this.statistics.dispose();
     }
@@ -717,6 +732,16 @@ JitsiConference.prototype.getLocalAudioTrack = function() {
  */
 JitsiConference.prototype.getLocalVideoTrack = function() {
     return this.rtc ? this.rtc.getLocalVideoTrack() : null;
+};
+
+/**
+ * Obtains the performance statistics.
+ * @returns {Object|null}
+ */
+JitsiConference.prototype.getPerformanceStats = function() {
+    return {
+        longTasksStats: this.statistics.getLongTasksStats()
+    };
 };
 
 /**
@@ -1607,6 +1632,13 @@ JitsiConference.prototype.onMemberLeft = function(jid) {
  * this is the id of the participant which was kicked.
  */
 JitsiConference.prototype.onMemberKicked = function(isSelfPresence, actorId, kickedParticipantId) {
+    // This check which be true when we kick someone else. With the introduction of lobby
+    // the ChatRoom KICKED event is now also emitted for ourselves (the kicker) so we want to
+    // avoid emitting an event where `undefined` kicked someone.
+    if (actorId === this.myUserId()) {
+        return;
+    }
+
     const actorParticipant = this.participants[actorId];
 
     if (isSelfPresence) {
@@ -2325,29 +2357,6 @@ JitsiConference.prototype.isStartAudioMuted = function() {
  */
 JitsiConference.prototype.isStartVideoMuted = function() {
     return this.startVideoMuted;
-};
-
-/**
- * Get object with internal logs.
- */
-JitsiConference.prototype.getLogs = function() {
-    const data = this.xmpp.getJingleLog();
-
-    const metadata = {};
-
-    metadata.time = new Date();
-    metadata.url = window.location.href;
-    metadata.ua = navigator.userAgent;
-
-    const log = this.xmpp.getXmppLog();
-
-    if (log) {
-        metadata.xmpp = log;
-    }
-
-    data.metadata = metadata;
-
-    return data;
 };
 
 /**
@@ -3352,7 +3361,29 @@ JitsiConference.prototype._sendConferenceJoinAnalyticsEvent = function() {
         meetingId,
         participantId: `${meetingId}.${this._statsCurrentId}`
     }));
-    this._conferenceJoinAnalyticsEventSent = true;
+    this._conferenceJoinAnalyticsEventSent = Date.now();
+};
+
+/**
+ * Sends conference.left analytics event.
+ * @private
+ */
+JitsiConference.prototype._sendConferenceLeftAnalyticsEvent = function() {
+    const meetingId = this.getMeetingUniqueId();
+
+    if (!meetingId || !this._conferenceJoinAnalyticsEventSent) {
+
+        return;
+    }
+
+    Statistics.sendAnalytics(createConferenceEvent('left', {
+        meetingId,
+        participantId: `${meetingId}.${this._statsCurrentId}`,
+        stats: {
+            duration: Math.floor((Date.now() - this._conferenceJoinAnalyticsEventSent) / 1000),
+            perf: this.getPerformanceStats()
+        }
+    }));
 };
 
 /**
